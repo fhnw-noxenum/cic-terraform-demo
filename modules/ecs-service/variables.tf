@@ -141,8 +141,8 @@ variable "enable_container_insights" {
   default     = false
 }
 
-variable "model_bucket_arn" {
-  description = "Optional: S3 bucket ARN the task role gets read-only access to. Empty string = no policy."
+variable "model_bucket_name" {
+  description = "Optional: S3 bucket name the task role gets read-only access to. Empty string = no policy."
   type        = string
   default     = ""
 }

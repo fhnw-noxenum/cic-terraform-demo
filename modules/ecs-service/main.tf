@@ -10,12 +10,12 @@
 # That's the point of modules.
 
 terraform {
-  required_version = ">= 1.6"
+  required_version = ">= 1.10"
 
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "~> 6.0"
     }
   }
 }
@@ -89,7 +89,7 @@ resource "aws_security_group" "tasks" {
     from_port       = var.container_port
     to_port         = var.container_port
     protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]  # not a CIDR, an SG reference
+    security_groups = [aws_security_group.alb.id] # not a CIDR, an SG reference
   }
 
   egress {
@@ -121,7 +121,7 @@ resource "aws_lb_target_group" "this" {
   port        = var.container_port
   protocol    = "HTTP"
   vpc_id      = var.vpc_id
-  target_type = "ip"          # Fargate uses ENI IPs, not instance IDs
+  target_type = "ip" # Fargate uses ENI IPs, not instance IDs
 
   health_check {
     path                = var.health_check_path
@@ -168,6 +168,51 @@ resource "aws_iam_role_policy_attachment" "execution_managed" {
 resource "aws_iam_role" "task" {
   name               = "${local.name_prefix}-task"
   assume_role_policy = data.aws_iam_policy_document.ecs_assume.json
+}
+
+# Secrets in the container definition are fetched by ECS itself at startup,
+# so the EXECUTION role (not the task role) needs to read them.
+resource "aws_iam_role_policy" "execution_secrets" {
+  count = length(var.secret_arns) > 0 ? 1 : 0
+
+  name = "${local.name_prefix}-read-secrets"
+  role = aws_iam_role.execution.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue"]
+      Resource = values(var.secret_arns)
+    }]
+  })
+}
+
+# Optional: read-only access to the model bucket for the application code.
+# Pass the bucket NAME (known at plan time) rather than its ARN — the ARN of a
+# bucket that doesn't exist yet is unknown at plan time, and `count` can't
+# depend on unknown values.
+resource "aws_iam_role_policy" "task_model_bucket" {
+  count = var.model_bucket_name == "" ? 0 : 1
+
+  name = "${local.name_prefix}-read-models"
+  role = aws_iam_role.task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = "arn:aws:s3:::${var.model_bucket_name}"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = "arn:aws:s3:::${var.model_bucket_name}/*"
+      },
+    ]
+  })
 }
 
 data "aws_iam_policy_document" "ecs_assume" {
@@ -220,7 +265,7 @@ resource "aws_ecs_task_definition" "this" {
       logDriver = "awslogs"
       options = {
         awslogs-group         = aws_cloudwatch_log_group.this.name
-        awslogs-region        = data.aws_region.current.name
+        awslogs-region        = data.aws_region.current.region
         awslogs-stream-prefix = "ecs"
       }
     }
@@ -254,7 +299,7 @@ resource "aws_ecs_service" "this" {
   network_configuration {
     subnets          = var.private_subnet_ids
     security_groups  = [aws_security_group.tasks.id]
-    assign_public_ip = false                          # tasks in private subnets
+    assign_public_ip = false # tasks in private subnets
   }
 
   load_balancer {
@@ -263,11 +308,10 @@ resource "aws_ecs_service" "this" {
     container_port   = var.container_port
   }
 
-  # Don't fight with CD: if someone bumps the image tag via a deployment
-  # tool, don't immediately revert it on the next terraform apply.
-  lifecycle {
-    ignore_changes = [task_definition]
-  }
+  # Terraform owns the image tag here: change `image`, apply, and ECS rolls
+  # out a new task definition. (If a separate CD tool deployed images, you
+  # would add lifecycle { ignore_changes = [task_definition] } so the two
+  # don't fight — but then Terraform image changes stop taking effect.)
 
   # Wait for ALB target group to exist before starting tasks.
   depends_on = [aws_lb_listener.http]

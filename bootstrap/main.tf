@@ -1,20 +1,24 @@
 # bootstrap/main.tf
 #
-# Chicken-and-egg solution: this stack creates the S3 bucket and DynamoDB
-# table that every OTHER stack uses as its remote backend.
+# Chicken-and-egg solution: this stack creates the S3 bucket that every OTHER
+# stack uses as its remote backend.
 #
 # It uses LOCAL state itself (no backend "s3" block) — because the S3 bucket
 # it manages doesn't exist yet on the first run.
 #
-# Run this ONCE per AWS account. Then never touch it again.
+# Run this ONCE per AWS account (the instructor does this, not the students).
+# Then never touch it again.
+#
+# State locking: since Terraform 1.10 the S3 backend can lock with a small
+# lock file next to the state (use_lockfile = true). No DynamoDB table needed.
 
 terraform {
-  required_version = ">= 1.6"
+  required_version = ">= 1.10"
 
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "~> 6.0"
     }
   }
 
@@ -41,7 +45,8 @@ locals {
 }
 
 # ---------------------------------------------------------------------------
-# S3 bucket — stores the .tfstate files for every other environment.
+# S3 bucket — stores the .tfstate files (and lock files) for every other stack.
+# Every student gets their own key in this one bucket.
 # ---------------------------------------------------------------------------
 
 resource "aws_s3_bucket" "tfstate" {
@@ -83,24 +88,4 @@ resource "aws_s3_bucket_public_access_block" "tfstate" {
   block_public_policy     = true
   ignore_public_acls      = true
   restrict_public_buckets = true
-}
-
-# ---------------------------------------------------------------------------
-# DynamoDB lock table — prevents two engineers from running apply at the
-# same time and corrupting state.
-# ---------------------------------------------------------------------------
-
-resource "aws_dynamodb_table" "tfstate_lock" {
-  name         = "terraform-state-lock-${var.project}"
-  billing_mode = "PAY_PER_REQUEST"        # cheap; you barely use it
-  hash_key     = "LockID"
-
-  attribute {
-    name = "LockID"
-    type = "S"
-  }
-
-  lifecycle {
-    prevent_destroy = true
-  }
 }

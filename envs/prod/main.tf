@@ -3,21 +3,23 @@
 # Prod. Same module as dev, different inputs:
 # - Larger task size (1 vCPU, 2 GB)
 # - 2 tasks minimum, autoscaling to 8 on CPU
-# - 2 NAT gateways (one per AZ, no SPOF)
+# - 3 NAT gateways (one per AZ, no SPOF)
 # - 30-day log retention
 # - Container Insights enabled
 # - Image is pulled from ECR (no public placeholder)
 #
 # Note the data source pattern: prod LOOKS UP resources created by dev
 # (the ECR repo, since image registries are shared across environments).
+#
+# INSTRUCTOR ONLY. Students stay in envs/dev. This costs ~$190/month.
 
 terraform {
-  required_version = ">= 1.6"
+  required_version = ">= 1.10"
 
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "~> 6.0"
     }
   }
 }
@@ -32,10 +34,12 @@ provider "aws" {
       Owner       = "data-team"
       ManagedBy   = "terraform"
       Repo        = "github.com/acme/ml-platform"
-      Compliance  = "pii-no"    # one-flag tag for downstream policies
+      Compliance  = "pii-no" # one-flag tag for downstream policies
     }
   }
 }
+
+data "aws_caller_identity" "current" {}
 
 locals {
   env = "prod"
@@ -47,19 +51,19 @@ locals {
 
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
-  version = "~> 5.13"
+  version = "~> 6.0"
 
   name = "${local.env}-vpc"
-  cidr = "10.30.0.0/16"        # different CIDR than dev — no overlap
+  cidr = "10.30.0.0/16" # different CIDR than dev — no overlap
 
   azs             = ["${var.aws_region}a", "${var.aws_region}b", "${var.aws_region}c"]
   public_subnets  = ["10.30.101.0/24", "10.30.102.0/24", "10.30.103.0/24"]
-  private_subnets = ["10.30.1.0/24",   "10.30.2.0/24",   "10.30.3.0/24"]
+  private_subnets = ["10.30.1.0/24", "10.30.2.0/24", "10.30.3.0/24"]
 
-  enable_nat_gateway   = true
-  single_nat_gateway   = false   # one NAT per AZ — no SPOF
+  enable_nat_gateway     = true
+  single_nat_gateway     = false # one NAT per AZ — no SPOF
   one_nat_gateway_per_az = true
-  enable_dns_hostnames = true
+  enable_dns_hostnames   = true
 
   # Flow logs to CloudWatch — useful for security investigations.
   enable_flow_log                      = true
@@ -74,7 +78,7 @@ module "vpc" {
 # ---------------------------------------------------------------------------
 
 data "aws_ecr_repository" "app" {
-  name = "inference-api"
+  name = "${var.student}-inference-api" # created by envs/dev with the same student name
 }
 
 # ---------------------------------------------------------------------------
@@ -82,7 +86,7 @@ data "aws_ecr_repository" "app" {
 # ---------------------------------------------------------------------------
 
 resource "aws_s3_bucket" "models" {
-  bucket = "${var.account_short_name}-${local.env}-models"
+  bucket = "${var.student}-${local.env}-models-${data.aws_caller_identity.current.account_id}"
 }
 
 resource "aws_s3_bucket_versioning" "models" {
@@ -135,7 +139,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "models" {
 # ---------------------------------------------------------------------------
 
 resource "aws_secretsmanager_secret" "third_party_api_key" {
-  name                    = "${local.env}/inference-api/third-party-key"
+  name                    = "${local.env}/${var.student}-inference-api/third-party-key"
   description             = "API key for the upstream model registry"
   recovery_window_in_days = 30
 }
@@ -148,7 +152,7 @@ module "api" {
   source = "../../modules/ecs-service"
 
   environment  = local.env
-  service_name = "inference-api"
+  service_name = "${var.student}-api"
 
   vpc_id             = module.vpc.vpc_id
   public_subnet_ids  = module.vpc.public_subnets
@@ -158,10 +162,10 @@ module "api" {
   container_port = 8080
 
   # Bigger box.
-  cpu           = 1024     # 1 vCPU
-  memory        = 2048     # 2 GiB
-  desired_count = 2        # always-on baseline
-  max_count     = 8        # scales up under load
+  cpu           = 1024 # 1 vCPU
+  memory        = 2048 # 2 GiB
+  desired_count = 2    # always-on baseline
+  max_count     = 8    # scales up under load
 
   enable_autoscaling        = true
   enable_container_insights = true
@@ -177,37 +181,21 @@ module "api" {
     "curl -f http://localhost:8080/health || exit 1"
   ]
 
-  model_bucket_arn = aws_s3_bucket.models.arn
+  model_bucket_name = aws_s3_bucket.models.bucket
 
   env_vars = {
     ENV          = local.env
     LOG_LEVEL    = "INFO"
-    MODEL_BUCKET = aws_s3_bucket.models.id
+    MODEL_BUCKET = aws_s3_bucket.models.bucket
   }
 
+  # Injected as an env var at container start. The module grants the ECS
+  # execution role read access to exactly these secrets.
+  # NOTE: the secret needs a value before tasks can start:
+  #   aws secretsmanager put-secret-value --secret-id <name> --secret-string '...'
   secret_arns = {
     THIRD_PARTY_API_KEY = aws_secretsmanager_secret.third_party_api_key.arn
   }
-}
-
-# ---------------------------------------------------------------------------
-# Extra IAM: let the task role read the third-party API key secret.
-# Attached at the env level, not in the module — the module doesn't know
-# about this specific secret.
-# ---------------------------------------------------------------------------
-
-resource "aws_iam_role_policy" "task_secrets" {
-  name = "${local.env}-task-secrets"
-  role = module.api.task_role_name
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = ["secretsmanager:GetSecretValue"]
-      Resource = aws_secretsmanager_secret.third_party_api_key.arn
-    }]
-  })
 }
 
 # ---------------------------------------------------------------------------
@@ -215,7 +203,7 @@ resource "aws_iam_role_policy" "task_secrets" {
 # ---------------------------------------------------------------------------
 
 resource "aws_cloudwatch_metric_alarm" "high_5xx" {
-  alarm_name          = "${local.env}-inference-api-5xx"
+  alarm_name          = "${local.env}-${var.student}-api-5xx"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
   period              = 60
@@ -226,7 +214,7 @@ resource "aws_cloudwatch_metric_alarm" "high_5xx" {
   namespace   = "AWS/ApplicationELB"
 
   dimensions = {
-    LoadBalancer = module.api.alb_arn
+    LoadBalancer = module.api.alb_arn_suffix # CloudWatch wants "app/<name>/<id>", not the full ARN
   }
 
   alarm_description = "More than 10 5xx errors per minute from inference-api"

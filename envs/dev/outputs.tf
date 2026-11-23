@@ -1,12 +1,12 @@
 # envs/dev/outputs.tf
 
 output "api_url" {
-  description = "The dev API URL. Test with: curl $(terraform output -raw api_url)/health"
+  description = "Your dev API URL. Open it in a browser (nginx welcome page until you deploy your own image; then try /health)."
   value       = "http://${module.api.alb_dns_name}"
 }
 
 output "ecr_repository_url" {
-  description = "Push images here: docker push <this>:v1"
+  description = "Push images here: app/build-and-push.sh does that for you."
   value       = aws_ecr_repository.app.repository_url
 }
 

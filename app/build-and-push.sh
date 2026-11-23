@@ -1,27 +1,30 @@
 #!/usr/bin/env bash
 # app/build-and-push.sh
 #
-# Build the image and push it to ECR. Run from the app/ directory after
-# the dev stack has been applied (so the ECR repo exists).
+# Build the image and push it to YOUR ECR repo. Run from the app/ directory
+# after your dev stack has been applied (so the ECR repo exists).
 #
-# Usage:  ./build-and-push.sh v1.0
+# Usage:  ./build-and-push.sh v1
 
 set -euo pipefail
 
 TAG="${1:-}"
 if [[ -z "$TAG" ]]; then
-    echo "Usage: $0 <tag>   e.g. $0 v1.0"
+    echo "Usage: $0 <tag>   e.g. $0 v1"
     exit 1
 fi
 
-REGION="${AWS_REGION:-eu-central-1}"
-ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-ECR_HOST="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
-REPO="inference-api"
-IMAGE="${ECR_HOST}/${REPO}:${TAG}"
+# Ask Terraform for the repo URL instead of hard-coding it — it contains your
+# student name and the account ID.
+REPO_URL="$(terraform -chdir=../envs/dev output -raw ecr_repository_url)"
+ECR_HOST="${REPO_URL%%/*}"
+REGION="$(echo "$ECR_HOST" | cut -d. -f4)"
+IMAGE="${REPO_URL}:${TAG}"
 
 echo "==> Building ${IMAGE}"
-docker build -t "${IMAGE}" .
+# Fargate runs x86_64 by default. Without --platform, an Apple-silicon Mac
+# builds an arm64 image and the task dies with "exec format error".
+docker build --platform linux/amd64 -t "${IMAGE}" .
 
 echo "==> Logging in to ECR"
 aws ecr get-login-password --region "${REGION}" \
@@ -33,7 +36,7 @@ docker push "${IMAGE}"
 echo ""
 echo "Pushed: ${IMAGE}"
 echo ""
-echo "Now update envs/dev/dev.tfvars:"
+echo "Now set in envs/dev/terraform.tfvars:"
 echo "  image_uri = \"${IMAGE}\""
 echo ""
-echo "Then: cd ../envs/dev && terraform apply -var-file=dev.tfvars"
+echo "Then: cd ../envs/dev && terraform apply"
